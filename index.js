@@ -1,147 +1,135 @@
-import express from 'express'
-import cors from 'cors'
+import express from 'express';
+import cors from 'cors';
 import mongoose from 'mongoose';
-import Student from './Student.js';
-import crypto from 'crypto';
 import dotenv from 'dotenv';
+import crypto from 'crypto';
+import Student from './Student.js';
 
-dotenv.config()
-const app = express()
+dotenv.config();
 
-const PORT = process.env.PORT || 3000
-const url = process.env.mongoDBUrl
+const app = express();
+const PORT = process.env.PORT || 3000;
+const mongoDBUrl = process.env.mongoDBUrl;
 
-app.use(cors())
-app.use(express.json())
+app.use(cors());
+app.use(express.json());
 
-function validate(res, fields) {
+const validateInput = (req, res, next) => {
+    const { email, mobile } = req.body;
     const patterns = {
-        email: /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/,
+        email: /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/, 
         mobile: /^[6-9]\d{9}$/
     };
-    for (const [field, value] of Object.entries(fields)) {
-        if (!patterns[field].test(value)) {
-            return returnResponse(res, `Please enter a valid ${field}..!!`, 400);
-        }
+    
+    if (email && !patterns.email.test(email)) {
+        return res.status(400).json({ message: 'Please enter a valid email..!!' });
     }
-    return true;
-}
+    if (mobile && !patterns.mobile.test(mobile)) {
+        return res.status(400).json({ message: 'Please enter a valid mobile number..!!' });
+    }
+    next();
+};
 
-function returnResponse(res, msg, statusCode) {
-    return res.status(statusCode).json({ message: msg });
-}
+const authenticateUser = async (req, res, next) => {
+    const { email, mobile, password } = req.body;
+    if (!email && !mobile) {
+        return res.status(400).json({ message: 'Email or Mobile is required..!!' });
+    }
+    if (!password) {
+        return res.status(400).json({ message: 'Password is required..!!' });
+    }
+    
+    const user = await Student.findOne({ $or: [{ email }, { mobile }], password });
+    if (!user) {
+        return res.status(401).json({ message: 'Invalid email/mobile or password..!!' });
+    }
+    req.user = user;
+    next();
+};
 
-app.post('/register', async (req, res) => {
+app.post('/register', validateInput, async (req, res) => {
     try {
         const { email, mobile, ...userData } = req.body;
-
-        if (!validate(res, { email, mobile })) return;
         const existingUser = await Student.findOne({ $or: [{ email }, { mobile }] });
-
+        
         if (existingUser) {
-            let msg
-            if (existingUser.email === email) msg = "Email"
-            if (existingUser.mobile === mobile) msg = "Mobile"
-            return returnResponse(res, `${msg} already exists..!!`, 400);
+            const msg = existingUser.email === email ? 'Email' : 'Mobile';
+            return res.status(400).json({ message: `${msg} already exists..!!` });
         }
+        
         await Student.create({ email, mobile, ...userData, address: [] });
-        return returnResponse(res, "User Successfully Inserted..!!", 201);
+        res.status(201).json({ message: 'User Successfully Inserted..!!' });
     } catch (error) {
-        console.error("Error in /register:", error);
-        return returnResponse(res, "Something Went Wrong..!!", 500);
+        console.error('Error in /register:', error);
+        res.status(500).json({ message: 'Something Went Wrong..!!' });
     }
 });
 
-app.post('/login', async (req, res) => {
+app.post('/login', authenticateUser, async (req, res) => {
     try {
-        const { email, mobile, password } = req.body;
-
-        if (!password || (!email && !mobile)) {
-            return returnResponse(res, "Email or Mobile and Password are required..!!", 400);
-        }
-
-        const user = await Student.findOne({ 
-            $or: [{ email }, { mobile }], 
-            password 
-        });
-
-        if (!user) return returnResponse(res, "Invalid email/mobile or password..!!", 401);
-
+        const user = req.user;
         if (!user.token) {
             user.token = crypto.randomBytes(16).toString('hex');
             await user.save();
         }
-
-        return res.status(200).json({
+        res.status(200).json({
             email: user.email,
             mobile: user.mobile,
             token: user.token
         });
-
     } catch (error) {
-        console.error("Error in /login:", error);
-        return returnResponse(res, "Internal Server Error..!!", 500);
+        console.error('Error in /login:', error);
+        res.status(500).json({ message: 'Internal Server Error..!!' });
     }
 });
 
-
-app.post('/address', async (req, res) => {
+app.post('/address', authenticateUser, async (req, res) => {
     try {
-        const { email, mobile, password, address } = req.body;
-
-        if (!email && !mobile) {
-            return returnResponse(res, "Email or Mobile is required..!!", 400);
-        }
-        if (!password) {
-            return returnResponse(res, "Password is required..!!", 400);
-        }
+        const { address } = req.body;
         if (!address) {
-            return returnResponse(res, "Address cannot be empty..!!", 400);
+            return res.status(400).json({ message: 'Address cannot be empty..!!' });
         }
+        
+        req.user.address.push(address);
+        await req.user.save();
 
-        const user = await Student.findOne({ 
-            $or: [{ email }, { mobile }], 
-            password 
-        });
-
-        if (!user) {
-            return returnResponse(res, "User does not exist, please register..!!", 400);
-        }
-
-        user.address.push(address);
-        await user.save();
-
-        return returnResponse(res, "User Address Added Successfully..!!", 200);
+        res.status(200).json({ message: 'User Address Added Successfully..!!' });
     } catch (error) {
-        return returnResponse(res, "Something Went Wrong..!!", 500);
+        console.error('Error in /address:', error);
+        res.status(500).json({ message: 'Something Went Wrong..!!' });
     }
 });
-
 
 app.get('/me', async (req, res) => {
     try {
-        const { token } = req.body
-        const user = await Student.findOne({ token })
-        let msg, status = 200
+        const { token } = req.body;
+        if (!token) {
+            return res.status(400).json({ message: 'Token is required..!!' });
+        }
+        
+        const user = await Student.findOne({ token });
         if (!user) {
-            msg = `No user found for the token ${token}`
-            status = 404
-        } 
-        msg = {
+            return res.status(404).json({ message: `No user found for the token ${token}` });
+        }
+        
+        res.status(200).json({
             email: user.email,
-            name: user.firstname + user.lastname,
+            name: `${user.firstname} ${user.lastname}`,
             mobile: user.mobile,
             address: user.address
-        }
-        return returnResponse(res, msg, status)
+        });
     } catch (error) {
-        return returnResponse(res, "Something Went Wrong..!!", 500)
+        console.error('Error in /me:', error);
+        res.status(500).json({ message: 'Something Went Wrong..!!' });
     }
-})
+});
 
 mongoose
-    .connect(url)
+    .connect(mongoDBUrl)
     .then(() => {
-        console.log("DB connected")
-        app.listen(PORT, () => console.log(`Server is running on PORT : ${PORT}`))
+        console.log('DB connected');
+        app.listen(PORT, () => console.log(`Server is running on PORT : ${PORT}`));
     })
+    .catch((error) => {
+        console.error('DB Connection Error:', error);
+    });
